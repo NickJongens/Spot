@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 
 const app = express();
 
@@ -108,13 +108,14 @@ async function getAccessToken() {
 }
 
 function mapNowPlaying(data) {
-  if (!data || !data.item || data.is_playing !== true) {
+  if (!data || !data.item) {
     return { is_playing: false };
   }
 
   const item = data.item;
   return {
-    is_playing: true,
+    is_playing: data.is_playing === true,
+    is_paused: data.is_playing === false,
     track: item.name || "",
     artist: (item.artists || []).map((a) => a.name).join(", "),
     album: item.album?.name || "",
@@ -192,42 +193,64 @@ app.get("/", (_req, res) => {
     <style>
       :root {
         color-scheme: dark;
-        font-family: "Segoe UI", Arial, sans-serif;
+        --bg0: #070809;
+        --bg1: #0c1612;
+        --card: rgba(18, 21, 23, 0.82);
+        --stroke: rgba(255, 255, 255, 0.11);
+        --text: #f6f6f6;
+        --sub: #9da4a8;
+        --accent: #1ed760;
+        --accent-soft: rgba(30, 215, 96, 0.25);
+        font-family: "Aptos", "Segoe UI", Arial, sans-serif;
       }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background: radial-gradient(circle at top left, #1f3a2b 0%, #121212 55%);
-        color: #ffffff;
+        background:
+          radial-gradient(1000px 700px at 0% 0%, #123323 0%, transparent 60%),
+          radial-gradient(900px 650px at 100% 100%, #16242f 0%, transparent 64%),
+          linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%);
+        color: var(--text);
       }
       .player {
-        width: min(760px, 92vw);
-        border-radius: 18px;
-        padding: 20px;
-        background: linear-gradient(180deg, #1a1a1a 0%, #121212 100%);
-        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
-        border: 1px solid #2b2b2b;
+        width: min(860px, 92vw);
+        border-radius: 24px;
+        padding: 28px;
+        background: var(--card);
+        border: 1px solid var(--stroke);
+        box-shadow: 0 22px 60px rgba(0, 0, 0, 0.48);
+        backdrop-filter: blur(14px) saturate(140%);
       }
       .head {
-        margin: 0 0 16px;
-        font-size: 0.9rem;
-        color: #b3b3b3;
+        margin: 0 0 18px;
+        font-size: 0.8rem;
+        color: var(--sub);
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.12em;
+      }
+      .status {
+        margin-left: 8px;
+        font-size: 0.72rem;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--stroke);
+        color: var(--sub);
       }
       .content {
         display: grid;
-        grid-template-columns: 180px 1fr;
-        gap: 18px;
+        grid-template-columns: 230px 1fr;
+        gap: 26px;
         align-items: center;
       }
       .cover {
-        width: 180px;
+        width: 230px;
         aspect-ratio: 1;
-        border-radius: 10px;
-        background: #262626;
+        border-radius: 16px;
+        background: #1f2427;
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.09);
         object-fit: cover;
       }
       .meta {
@@ -235,74 +258,81 @@ app.get("/", (_req, res) => {
       }
       .track {
         margin: 0;
-        font-size: 1.35rem;
-        line-height: 1.25;
+        font-size: clamp(1.4rem, 2.8vw, 2.1rem);
+        line-height: 1.15;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
       .artist {
-        margin-top: 4px;
-        color: #b3b3b3;
-        font-size: 1.02rem;
+        margin-top: 6px;
+        color: #d3d7da;
+        font-size: 1.06rem;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
       .album {
-        margin-top: 2px;
-        color: #8a8a8a;
-        font-size: 0.92rem;
+        margin-top: 4px;
+        color: var(--sub);
+        font-size: 0.95rem;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
       .progress-wrap {
-        margin-top: 18px;
+        margin-top: 22px;
       }
       .progress-bar {
         width: 100%;
-        height: 4px;
+        height: 6px;
         border-radius: 999px;
-        background: #4d4d4d;
+        background: #3a3f43;
         overflow: hidden;
       }
       .progress-fill {
         height: 100%;
         width: 0%;
-        background: #1db954;
-        transition: width 0.2s linear;
+        background: linear-gradient(90deg, #1aa64b 0%, var(--accent) 100%);
+        box-shadow: 0 0 18px var(--accent-soft);
+        transition: width 0.15s linear;
       }
       .times {
-        margin-top: 6px;
+        margin-top: 8px;
         display: flex;
         justify-content: space-between;
-        color: #a7a7a7;
+        color: var(--sub);
         font-size: 0.82rem;
       }
       .actions {
-        margin-top: 14px;
+        margin-top: 16px;
         font-size: 0.9rem;
-        color: #b3b3b3;
       }
       a {
         color: #ffffff;
-        text-decoration-color: #1db954;
+        text-decoration: none;
+        border-bottom: 1px solid var(--accent);
+      }
+      a:hover {
+        color: var(--accent);
       }
       @media (max-width: 620px) {
+        .player {
+          padding: 22px;
+          border-radius: 18px;
+        }
         .content {
           grid-template-columns: 1fr;
         }
         .cover {
-          width: 100%;
-          max-width: 260px;
+          width: min(320px, 100%);
         }
       }
     </style>
   </head>
   <body>
     <main class="player">
-      <div class="head">Now Playing</div>
+      <div class="head">Now Playing <span id="statusTag" class="status">CONNECTING</span></div>
       <section class="content">
         <img id="cover" class="cover" alt="Album artwork" />
         <div class="meta">
@@ -329,10 +359,21 @@ app.get("/", (_req, res) => {
       const progressNowEl = document.getElementById("progressNow");
       const progressTotalEl = document.getElementById("progressTotal");
       const actionsEl = document.getElementById("actions");
+      const statusTagEl = document.getElementById("statusTag");
 
-      let liveProgressMs = 0;
-      let liveDurationMs = 0;
-      let liveIsPlaying = false;
+      const IDLE_ART =
+        "data:image/svg+xml;utf8," +
+        encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500"><rect width="500" height="500" rx="72" fill="#121212"/><circle cx="250" cy="250" r="178" fill="#1ed760"/><path d="M153 214c62-17 132-10 191 20" stroke="#121212" stroke-width="22" stroke-linecap="round" fill="none"/><path d="M166 266c49-13 103-8 149 15" stroke="#121212" stroke-width="19" stroke-linecap="round" fill="none"/><path d="M178 313c35-9 73-5 105 10" stroke="#121212" stroke-width="17" stroke-linecap="round" fill="none"/></svg>');
+
+      let nowPlaying = {
+        trackId: "",
+        progressBaseMs: 0,
+        durationMs: 0,
+        anchorMs: performance.now(),
+        isPlaying: false
+      };
+
+      coverEl.src = IDLE_ART;
 
       function formatMs(ms) {
         const total = Math.max(0, Math.floor(ms / 1000));
@@ -341,18 +382,46 @@ app.get("/", (_req, res) => {
         return min + ":" + sec;
       }
 
+      function getComputedProgressMs() {
+        if (!nowPlaying.durationMs) {
+          return 0;
+        }
+        if (!nowPlaying.isPlaying) {
+          return Math.min(nowPlaying.progressBaseMs, nowPlaying.durationMs);
+        }
+        const elapsed = performance.now() - nowPlaying.anchorMs;
+        return Math.min(nowPlaying.progressBaseMs + Math.max(0, elapsed), nowPlaying.durationMs);
+      }
+
       function renderProgress() {
-        if (!liveDurationMs) {
+        if (!nowPlaying.durationMs) {
           progressFillEl.style.width = "0%";
           progressNowEl.textContent = "0:00";
           progressTotalEl.textContent = "0:00";
           return;
         }
-        const bounded = Math.min(liveProgressMs, liveDurationMs);
-        const pct = (bounded / liveDurationMs) * 100;
+        const bounded = getComputedProgressMs();
+        const pct = (bounded / nowPlaying.durationMs) * 100;
         progressFillEl.style.width = pct.toFixed(2) + "%";
         progressNowEl.textContent = formatMs(bounded);
-        progressTotalEl.textContent = formatMs(liveDurationMs);
+        progressTotalEl.textContent = formatMs(nowPlaying.durationMs);
+      }
+
+      function setIdleState(title, subtitle) {
+        statusTagEl.textContent = "IDLE";
+        trackEl.textContent = title;
+        artistEl.textContent = subtitle;
+        albumEl.textContent = "";
+        actionsEl.textContent = "";
+        coverEl.src = IDLE_ART;
+        nowPlaying = {
+          trackId: "",
+          progressBaseMs: 0,
+          durationMs: 0,
+          anchorMs: performance.now(),
+          isPlaying: false
+        };
+        renderProgress();
       }
 
       async function loadNowPlaying() {
@@ -361,75 +430,66 @@ app.get("/", (_req, res) => {
           const data = await response.json();
 
           if (!response.ok || data.error) {
-            trackEl.textContent = "Unavailable";
-            artistEl.textContent = data.error ? String(data.error) : "API error";
-            albumEl.textContent = "";
-            actionsEl.textContent = "";
-            coverEl.removeAttribute("src");
-            liveProgressMs = 0;
-            liveDurationMs = 0;
-            liveIsPlaying = false;
-            renderProgress();
+            setIdleState("Unavailable", data.error ? String(data.error) : "API error");
             return;
           }
 
-          if (!data.is_playing) {
-            trackEl.textContent = "Not Playing";
-            artistEl.textContent = "Spotify is idle right now.";
-            albumEl.textContent = "";
-            actionsEl.textContent = "";
-            coverEl.removeAttribute("src");
-            liveProgressMs = 0;
-            liveDurationMs = 0;
-            liveIsPlaying = false;
-            renderProgress();
+          if (!data.id) {
+            setIdleState("Not Playing", "Spotify is idle right now.");
             return;
           }
+
+          statusTagEl.textContent = data.is_playing ? "PLAYING" : "PAUSED";
 
           trackEl.textContent = data.track || "Unknown Track";
           artistEl.textContent = data.artist || "Unknown Artist";
           albumEl.textContent = data.album ? "Album: " + data.album : "";
           actionsEl.innerHTML = data.url
-            ? '<a href="' + data.url + '" target="_blank" rel="noopener">Open in Spotify</a> · Read-only mirror'
-            : "Read-only mirror";
+            ? '<a href="' + data.url + '" target="_blank" rel="noopener">Open in Spotify</a>'
+            : "";
 
           if (data.artwork_url) {
             coverEl.src = data.artwork_url;
           } else {
-            coverEl.removeAttribute("src");
+            coverEl.src = IDLE_ART;
           }
 
-          liveProgressMs = Number(data.progress_ms || 0);
-          liveDurationMs = Number(data.duration_ms || 0);
-          liveIsPlaying = true;
+          const trackId = String(data.id || "");
+          const incomingProgress = Number(data.progress_ms || 0);
+          const incomingDuration = Number(data.duration_ms || 0);
+          const sameTrack = trackId && trackId === nowPlaying.trackId;
+          const currentComputed = getComputedProgressMs();
+          const suspiciousZero = sameTrack && incomingProgress === 0 && currentComputed > 3000;
+
+          if (!suspiciousZero) {
+            nowPlaying = {
+              trackId,
+              progressBaseMs: Math.max(0, incomingProgress),
+              durationMs: Math.max(0, incomingDuration),
+              anchorMs: performance.now(),
+              isPlaying: data.is_playing === true
+            };
+          }
+
           renderProgress();
         } catch (_err) {
-          trackEl.textContent = "Unavailable";
-          artistEl.textContent = "Network error";
-          albumEl.textContent = "";
-          actionsEl.textContent = "";
-          coverEl.removeAttribute("src");
-          liveProgressMs = 0;
-          liveDurationMs = 0;
-          liveIsPlaying = false;
-          renderProgress();
+          setIdleState("Unavailable", "Network error");
         }
       }
 
       setInterval(() => {
-        if (liveIsPlaying && liveDurationMs > 0) {
-          liveProgressMs += 250;
+        if (nowPlaying.isPlaying && nowPlaying.durationMs > 0) {
           renderProgress();
         }
-      }, 250);
+      }, 200);
 
       loadNowPlaying();
-      setInterval(loadNowPlaying, 5000);
+      setInterval(loadNowPlaying, 2000);
     </script>
   </body>
 </html>`);
 });
-
 app.listen(PORT, () => {
   console.log(`spot service listening on :${PORT}`);
 });
+
