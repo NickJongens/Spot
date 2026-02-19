@@ -69,11 +69,11 @@ try {
   $response = $context.Response
 
   $code = $request.QueryString["code"]
-  $error = $request.QueryString["error"]
+  $authError = $request.QueryString["error"]
 
   $html = ""
-  if ($error) {
-    $html = "<html><body><h2>Spotify auth failed</h2><p>Error: $error</p></body></html>"
+  if ($authError) {
+    $html = "<html><body><h2>Spotify auth failed</h2><p>Error: $authError</p></body></html>"
   } elseif (-not $code) {
     $html = "<html><body><h2>No code received</h2><p>Try again.</p></body></html>"
   } else {
@@ -87,8 +87,8 @@ try {
   $response.OutputStream.Close()
   $listener.Stop()
 
-  if ($error) {
-    throw "Spotify authorization returned error: $error"
+  if ($authError) {
+    throw "Spotify authorization returned error: $authError"
   }
   if (-not $code) {
     throw "No authorization code received."
@@ -116,6 +116,7 @@ try {
   Write-Host "Do NOT commit .env or share this token." -ForegroundColor Yellow
 }
 catch {
-  Write-Error $_.Exception.Message
+  Write-Host ""
+  Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red
   exit 1
 }
