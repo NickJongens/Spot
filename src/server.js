@@ -118,6 +118,7 @@ function mapNowPlaying(data) {
     track: item.name || "",
     artist: (item.artists || []).map((a) => a.name).join(", "),
     album: item.album?.name || "",
+    artwork_url: item.album?.images?.[0]?.url || "",
     url: item.external_urls?.spotify || "",
     id: item.id || "",
     progress_ms: Number.isFinite(data.progress_ms) ? data.progress_ms : 0,
@@ -190,50 +191,169 @@ app.get("/", (_req, res) => {
     <title>Spotify Now Playing</title>
     <style>
       :root {
-        color-scheme: light;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color-scheme: dark;
+        font-family: "Segoe UI", Arial, sans-serif;
       }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background: #f6f7f9;
-        color: #151515;
+        background: radial-gradient(circle at top left, #1f3a2b 0%, #121212 55%);
+        color: #ffffff;
       }
-      .card {
-        width: min(680px, 92vw);
-        border: 1px solid #d9dce2;
-        border-radius: 14px;
-        padding: 24px;
-        background: #ffffff;
+      .player {
+        width: min(760px, 92vw);
+        border-radius: 18px;
+        padding: 20px;
+        background: linear-gradient(180deg, #1a1a1a 0%, #121212 100%);
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+        border: 1px solid #2b2b2b;
       }
-      h1 {
-        margin: 0 0 14px;
-        font-size: 1.2rem;
+      .head {
+        margin: 0 0 16px;
+        font-size: 0.9rem;
+        color: #b3b3b3;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
       }
-      #status {
-        font-size: 1.05rem;
+      .content {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: 18px;
+        align-items: center;
       }
-      #meta {
-        margin-top: 8px;
-        color: #556;
-        font-size: 0.95rem;
+      .cover {
+        width: 180px;
+        aspect-ratio: 1;
+        border-radius: 10px;
+        background: #262626;
+        object-fit: cover;
+      }
+      .meta {
+        min-width: 0;
+      }
+      .track {
+        margin: 0;
+        font-size: 1.35rem;
+        line-height: 1.25;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .artist {
+        margin-top: 4px;
+        color: #b3b3b3;
+        font-size: 1.02rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .album {
+        margin-top: 2px;
+        color: #8a8a8a;
+        font-size: 0.92rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .progress-wrap {
+        margin-top: 18px;
+      }
+      .progress-bar {
+        width: 100%;
+        height: 4px;
+        border-radius: 999px;
+        background: #4d4d4d;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: #1db954;
+        transition: width 0.2s linear;
+      }
+      .times {
+        margin-top: 6px;
+        display: flex;
+        justify-content: space-between;
+        color: #a7a7a7;
+        font-size: 0.82rem;
+      }
+      .actions {
+        margin-top: 14px;
+        font-size: 0.9rem;
+        color: #b3b3b3;
       }
       a {
-        color: #1e63d0;
+        color: #ffffff;
+        text-decoration-color: #1db954;
+      }
+      @media (max-width: 620px) {
+        .content {
+          grid-template-columns: 1fr;
+        }
+        .cover {
+          width: 100%;
+          max-width: 260px;
+        }
       }
     </style>
   </head>
   <body>
-    <main class="card">
-      <h1>Now Playing</h1>
-      <div id="status">Loading...</div>
-      <div id="meta"></div>
+    <main class="player">
+      <div class="head">Now Playing</div>
+      <section class="content">
+        <img id="cover" class="cover" alt="Album artwork" />
+        <div class="meta">
+          <h1 id="track" class="track">Loading...</h1>
+          <div id="artist" class="artist"></div>
+          <div id="album" class="album"></div>
+          <div class="progress-wrap">
+            <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+            <div class="times">
+              <span id="progressNow">0:00</span>
+              <span id="progressTotal">0:00</span>
+            </div>
+          </div>
+          <div id="actions" class="actions"></div>
+        </div>
+      </section>
     </main>
     <script>
-      const statusEl = document.getElementById("status");
-      const metaEl = document.getElementById("meta");
+      const coverEl = document.getElementById("cover");
+      const trackEl = document.getElementById("track");
+      const artistEl = document.getElementById("artist");
+      const albumEl = document.getElementById("album");
+      const progressFillEl = document.getElementById("progressFill");
+      const progressNowEl = document.getElementById("progressNow");
+      const progressTotalEl = document.getElementById("progressTotal");
+      const actionsEl = document.getElementById("actions");
+
+      let liveProgressMs = 0;
+      let liveDurationMs = 0;
+      let liveIsPlaying = false;
+
+      function formatMs(ms) {
+        const total = Math.max(0, Math.floor(ms / 1000));
+        const min = Math.floor(total / 60);
+        const sec = String(total % 60).padStart(2, "0");
+        return min + ":" + sec;
+      }
+
+      function renderProgress() {
+        if (!liveDurationMs) {
+          progressFillEl.style.width = "0%";
+          progressNowEl.textContent = "0:00";
+          progressTotalEl.textContent = "0:00";
+          return;
+        }
+        const bounded = Math.min(liveProgressMs, liveDurationMs);
+        const pct = (bounded / liveDurationMs) * 100;
+        progressFillEl.style.width = pct.toFixed(2) + "%";
+        progressNowEl.textContent = formatMs(bounded);
+        progressTotalEl.textContent = formatMs(liveDurationMs);
+      }
 
       async function loadNowPlaying() {
         try {
@@ -241,26 +361,67 @@ app.get("/", (_req, res) => {
           const data = await response.json();
 
           if (!response.ok || data.error) {
-            statusEl.textContent = "Unavailable";
-            metaEl.textContent = data.error ? String(data.error) : "API error";
+            trackEl.textContent = "Unavailable";
+            artistEl.textContent = data.error ? String(data.error) : "API error";
+            albumEl.textContent = "";
+            actionsEl.textContent = "";
+            coverEl.removeAttribute("src");
+            liveProgressMs = 0;
+            liveDurationMs = 0;
+            liveIsPlaying = false;
+            renderProgress();
             return;
           }
 
           if (!data.is_playing) {
-            statusEl.textContent = "Not playing";
-            metaEl.textContent = "";
+            trackEl.textContent = "Not Playing";
+            artistEl.textContent = "Spotify is idle right now.";
+            albumEl.textContent = "";
+            actionsEl.textContent = "";
+            coverEl.removeAttribute("src");
+            liveProgressMs = 0;
+            liveDurationMs = 0;
+            liveIsPlaying = false;
+            renderProgress();
             return;
           }
 
-          statusEl.textContent = data.track + " - " + data.artist;
-          metaEl.innerHTML = data.album
-            ? "Album: " + data.album + (data.url ? ' | <a href="' + data.url + '" target="_blank" rel="noopener">Open in Spotify</a>' : "")
-            : (data.url ? '<a href="' + data.url + '" target="_blank" rel="noopener">Open in Spotify</a>' : "");
+          trackEl.textContent = data.track || "Unknown Track";
+          artistEl.textContent = data.artist || "Unknown Artist";
+          albumEl.textContent = data.album ? "Album: " + data.album : "";
+          actionsEl.innerHTML = data.url
+            ? '<a href="' + data.url + '" target="_blank" rel="noopener">Open in Spotify</a> · Read-only mirror'
+            : "Read-only mirror";
+
+          if (data.artwork_url) {
+            coverEl.src = data.artwork_url;
+          } else {
+            coverEl.removeAttribute("src");
+          }
+
+          liveProgressMs = Number(data.progress_ms || 0);
+          liveDurationMs = Number(data.duration_ms || 0);
+          liveIsPlaying = true;
+          renderProgress();
         } catch (_err) {
-          statusEl.textContent = "Unavailable";
-          metaEl.textContent = "Network error";
+          trackEl.textContent = "Unavailable";
+          artistEl.textContent = "Network error";
+          albumEl.textContent = "";
+          actionsEl.textContent = "";
+          coverEl.removeAttribute("src");
+          liveProgressMs = 0;
+          liveDurationMs = 0;
+          liveIsPlaying = false;
+          renderProgress();
         }
       }
+
+      setInterval(() => {
+        if (liveIsPlaying && liveDurationMs > 0) {
+          liveProgressMs += 250;
+          renderProgress();
+        }
+      }, 250);
 
       loadNowPlaying();
       setInterval(loadNowPlaying, 5000);
