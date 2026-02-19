@@ -1,0 +1,15 @@
+services:
+  spot:
+    build: .
+    image: spot-now-playing:latest
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
+      SPOTIFY_REFRESH_TOKEN: ${SPOTIFY_REFRESH_TOKEN}
+      SCOPES: ${SCOPES:-user-read-currently-playing user-read-playback-state}
+      PUBLIC_MODE: ${PUBLIC_MODE:-true}
+      API_KEY: ${API_KEY:-}
+      PORT: 3000
+    restart: unless-stopped
