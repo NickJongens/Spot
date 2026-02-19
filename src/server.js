@@ -328,6 +328,11 @@ app.get("/", (_req, res) => {
           width: min(320px, 100%);
         }
       }
+      @media (max-height: 720px) {
+        .actions {
+          display: none;
+        }
+      }
     </style>
   </head>
   <body>
@@ -363,7 +368,7 @@ app.get("/", (_req, res) => {
 
       const IDLE_ART =
         "data:image/svg+xml;utf8," +
-        encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500"><rect width="500" height="500" rx="72" fill="#121212"/><circle cx="250" cy="250" r="178" fill="#1ed760"/><path d="M153 214c62-17 132-10 191 20" stroke="#121212" stroke-width="22" stroke-linecap="round" fill="none"/><path d="M166 266c49-13 103-8 149 15" stroke="#121212" stroke-width="19" stroke-linecap="round" fill="none"/><path d="M178 313c35-9 73-5 105 10" stroke="#121212" stroke-width="17" stroke-linecap="round" fill="none"/></svg>');
+        encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500"><rect width="500" height="500" rx="72" fill="#1ed760"/><path d="M96 180c98-34 218-25 308 28" stroke="#0b0b0b" stroke-width="34" stroke-linecap="round" fill="none"/><path d="M115 262c78-26 172-19 244 21" stroke="#0b0b0b" stroke-width="28" stroke-linecap="round" fill="none"/><path d="M133 337c57-19 124-14 176 15" stroke="#0b0b0b" stroke-width="23" stroke-linecap="round" fill="none"/></svg>');
 
       let nowPlaying = {
         trackId: "",
