@@ -27,6 +27,9 @@ const tokenCache = {
 const limiterStore = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 120;
+const viewerClients = new Set();
+const history = [];
+let lastHistoryTrackId = "";
 
 function noStore(res) {
   res.set("Cache-Control", "no-store");
@@ -161,6 +164,22 @@ app.get("/api/now-playing", async (req, res) => {
   noStore(res);
   try {
     const payload = await fetchNowPlaying();
+    if (payload && payload.id && payload.id !== lastHistoryTrackId) {
+      lastHistoryTrackId = payload.id;
+      history.unshift({
+        id: payload.id,
+        track: payload.track,
+        artist: payload.artist,
+        album: payload.album,
+        artwork_url: payload.artwork_url,
+        url: payload.url,
+        played_at: new Date().toISOString()
+      });
+      if (history.length > 5) {
+        history.pop();
+      }
+    }
+    payload.viewers = viewerClients.size;
     res.json(payload);
   } catch (err) {
     res.status(502).json({ error: err.message || "Upstream error" });
@@ -179,6 +198,46 @@ app.get("/api/now-playing.txt", async (req, res) => {
   } catch (err) {
     return res.status(502).send("");
   }
+});
+
+app.get("/api/history", (req, res) => {
+  noStore(res);
+  res.json({ tracks: history });
+});
+
+app.get("/api/viewers", (req, res) => {
+  noStore(res);
+  res.json({ viewers: viewerClients.size });
+});
+
+app.get("/api/viewers/stream", (req, res) => {
+  noStore(res);
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive"
+  });
+  res.flushHeaders?.();
+
+  viewerClients.add(res);
+  res.write(`data: ${viewerClients.size}\n\n`);
+  for (const client of viewerClients) {
+    if (client !== res) {
+      client.write(`data: ${viewerClients.size}\n\n`);
+    }
+  }
+
+  const heartbeat = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 20_000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    viewerClients.delete(res);
+    for (const client of viewerClients) {
+      client.write(`data: ${viewerClients.size}\n\n`);
+    }
+  });
 });
 
 app.get("/", (_req, res) => {
@@ -229,6 +288,10 @@ app.get("/", (_req, res) => {
         color: var(--sub);
         text-transform: uppercase;
         letter-spacing: 0.12em;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
       }
       .status {
         margin-left: 8px;
@@ -237,6 +300,20 @@ app.get("/", (_req, res) => {
         border-radius: 999px;
         border: 1px solid var(--stroke);
         color: var(--sub);
+      }
+      .viewer {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.72rem;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--stroke);
+        color: var(--sub);
+      }
+      .viewer strong {
+        color: var(--text);
+        font-weight: 600;
       }
       .content {
         display: grid;
@@ -337,7 +414,10 @@ app.get("/", (_req, res) => {
   </head>
   <body>
     <main class="player">
-      <div class="head">Now Playing <span id="statusTag" class="status">CONNECTING</span></div>
+      <div class="head">
+        <span>Now Playing <span id="statusTag" class="status">CONNECTING</span></span>
+        <span class="viewer">Viewers <strong id="viewerCount">0</strong></span>
+      </div>
       <section class="content">
         <img id="cover" class="cover" alt="Album artwork" />
         <div class="meta">
@@ -365,6 +445,7 @@ app.get("/", (_req, res) => {
       const progressTotalEl = document.getElementById("progressTotal");
       const actionsEl = document.getElementById("actions");
       const statusTagEl = document.getElementById("statusTag");
+      const viewerCountEl = document.getElementById("viewerCount");
 
       const IDLE_ART =
         "data:image/svg+xml;utf8," +
@@ -490,6 +571,31 @@ app.get("/", (_req, res) => {
 
       loadNowPlaying();
       setInterval(loadNowPlaying, 2000);
+
+      if ("EventSource" in window) {
+        const viewerStream = new EventSource("/api/viewers/stream");
+        viewerStream.onmessage = (event) => {
+          const count = Number(event.data || 0);
+          viewerCountEl.textContent = Number.isFinite(count) ? String(count) : "0";
+        };
+        viewerStream.onerror = () => {
+          viewerStream.close();
+        };
+      } else {
+        const loadViewers = async () => {
+          try {
+            const response = await fetch("/api/viewers", { cache: "no-store" });
+            const data = await response.json();
+            viewerCountEl.textContent = Number.isFinite(data.viewers)
+              ? String(data.viewers)
+              : "0";
+          } catch (_err) {
+            viewerCountEl.textContent = "0";
+          }
+        };
+        loadViewers();
+        setInterval(loadViewers, 5000);
+      }
     </script>
   </body>
 </html>`);

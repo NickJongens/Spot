@@ -12,9 +12,12 @@ This implementation uses **Pattern A** (bring your own refresh token):
 
 ## Endpoints
 
-- `GET /` HTML page that polls every 5s
+- `GET /` HTML page that polls every 2s
 - `GET /api/now-playing` JSON
 - `GET /api/now-playing.txt` plain text
+- `GET /api/history` last 5 tracks with timestamps
+- `GET /api/viewers` viewer count for the `/` page
+- `GET /api/viewers/stream` live viewer count (SSE)
 - `GET /api/health` health check
 
 All API responses include `Cache-Control: no-store`.
