@@ -4,15 +4,21 @@ services:
     image: spot-now-playing:latest
     ports:
       - "${PORT:-3000}:3000"
+    volumes:
+      - spot-data:/app/data
     environment:
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
       SPOTIFY_REFRESH_TOKEN: ${SPOTIFY_REFRESH_TOKEN}
-      SCOPES: ${SCOPES:-user-read-currently-playing user-read-playback-state}
+      SCOPES: ${SCOPES:-user-read-currently-playing user-read-playback-state user-read-recently-played}
       PUBLIC_MODE: ${PUBLIC_MODE:-true}
       API_KEY: ${API_KEY:-}
-      COUNTER_STATE_FILE: ${COUNTER_STATE_FILE:-/app/data/yearly-counter.json}
+      COUNTER_STATE_FILE: ${COUNTER_STATE_FILE:-/app/data/daily-counter.json}
       COUNTER_POLL_MS: ${COUNTER_POLL_MS:-5000}
       COUNTER_FLUSH_DEBOUNCE_MS: ${COUNTER_FLUSH_DEBOUNCE_MS:-3000}
+      DAILY_SEED_MAX_PAGES: ${DAILY_SEED_MAX_PAGES:-24}
       PORT: 3000
     restart: unless-stopped
+
+volumes:
+  spot-data:

@@ -10,16 +10,17 @@ const PUBLIC_MODE = (process.env.PUBLIC_MODE || "true").toLowerCase() === "true"
 const API_KEY = process.env.API_KEY;
 const SCOPES =
   process.env.SCOPES ||
-  "user-read-currently-playing user-read-playback-state";
+  "user-read-currently-playing user-read-playback-state user-read-recently-played";
 const COUNTER_POLL_MS = Math.max(2000, Number(process.env.COUNTER_POLL_MS || 5000));
 const COUNTER_FLUSH_DEBOUNCE_MS = Math.max(
   1000,
   Number(process.env.COUNTER_FLUSH_DEBOUNCE_MS || 3000)
 );
+const DAILY_SEED_MAX_PAGES = Math.max(1, Number(process.env.DAILY_SEED_MAX_PAGES || 24));
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const COUNTER_STATE_FILE =
-  process.env.COUNTER_STATE_FILE || path.join(__dirname, "..", "data", "yearly-counter.json");
+  process.env.COUNTER_STATE_FILE || path.join(__dirname, "..", "data", "daily-counter.json");
 
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
@@ -43,8 +44,8 @@ const RATE_LIMIT_MAX = 120;
 const viewerClients = new Set();
 const history = [];
 let lastHistoryTrackId = "";
-const yearlyCounter = {
-  totalsMsByYear: Object.create(null),
+const dailyCounter = {
+  totalsMsByDay: Object.create(null),
   lastSnapshot: null,
   dirty: false,
   flushTimer: null,
@@ -174,44 +175,70 @@ async function fetchNowPlaying() {
   return mapNowPlaying(data);
 }
 
-function getUtcYearStartMs(year) {
-  return Date.UTC(year, 0, 1, 0, 0, 0, 0);
+function pad2(value) {
+  return String(value).padStart(2, "0");
 }
 
-function getUtcYearForMs(ms) {
-  return new Date(ms).getUTCFullYear();
+function getLocalDayKey(ms = Date.now()) {
+  const date = new Date(ms);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 }
 
-function getCurrentUtcYear() {
-  return new Date().getUTCFullYear();
+function getLocalDayStartMs(ms = Date.now()) {
+  const date = new Date(ms);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
 }
 
-function getCurrentYearlyMinutes() {
-  const yearKey = String(getCurrentUtcYear());
-  const totalMs = Number(yearlyCounter.totalsMsByYear[yearKey] || 0);
+function getNextLocalDayStartMs(ms) {
+  const date = new Date(ms);
+  date.setHours(24, 0, 0, 0);
+  return date.getTime();
+}
+
+function pruneCounterToToday() {
+  const todayKey = getLocalDayKey();
+  const hasToday = Object.prototype.hasOwnProperty.call(dailyCounter.totalsMsByDay, todayKey);
+  const todayMs = hasToday ? Number(dailyCounter.totalsMsByDay[todayKey] || 0) : 0;
+  const keys = Object.keys(dailyCounter.totalsMsByDay);
+  const shouldRewrite = keys.length !== 1 || !hasToday;
+  if (!shouldRewrite) {
+    return todayKey;
+  }
+
+  dailyCounter.totalsMsByDay = Object.create(null);
+  dailyCounter.totalsMsByDay[todayKey] = Math.max(0, Math.round(todayMs));
+  dailyCounter.dirty = true;
+  queueCounterFlush();
+  return todayKey;
+}
+
+function getCurrentDailyMinutes() {
+  const todayKey = pruneCounterToToday();
+  const totalMs = Number(dailyCounter.totalsMsByDay[todayKey] || 0);
   return Math.floor(Math.max(0, totalMs) / 60_000);
 }
 
 function queueCounterFlush() {
-  if (yearlyCounter.flushTimer) {
+  if (dailyCounter.flushTimer) {
     return;
   }
-  yearlyCounter.flushTimer = setTimeout(() => {
-    yearlyCounter.flushTimer = null;
-    void flushYearlyCounterToDisk();
+  dailyCounter.flushTimer = setTimeout(() => {
+    dailyCounter.flushTimer = null;
+    void flushDailyCounterToDisk();
   }, COUNTER_FLUSH_DEBOUNCE_MS);
-  yearlyCounter.flushTimer.unref?.();
+  dailyCounter.flushTimer.unref?.();
 }
 
-async function flushYearlyCounterToDisk(force = false) {
-  yearlyCounter.writeInFlight = yearlyCounter.writeInFlight.then(async () => {
-    if (!force && !yearlyCounter.dirty) {
+async function flushDailyCounterToDisk(force = false) {
+  dailyCounter.writeInFlight = dailyCounter.writeInFlight.then(async () => {
+    if (!force && !dailyCounter.dirty) {
       return;
     }
 
     const payload = {
       version: 1,
-      totals_ms_by_year: yearlyCounter.totalsMsByYear,
+      totals_ms_by_day: dailyCounter.totalsMsByDay,
       updated_at: new Date().toISOString()
     };
 
@@ -222,31 +249,32 @@ async function flushYearlyCounterToDisk(force = false) {
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(tmpPath, JSON.stringify(payload), "utf8");
       await fs.rename(tmpPath, COUNTER_STATE_FILE);
-      yearlyCounter.dirty = false;
+      dailyCounter.dirty = false;
     } catch (err) {
       console.error(
-        `Failed to persist yearly counter at ${COUNTER_STATE_FILE}: ${
-          err?.message || String(err)
-        }`
+        `Failed to persist daily counter at ${COUNTER_STATE_FILE}: ${err?.message || String(err)}`
       );
     }
   });
 
-  return yearlyCounter.writeInFlight;
+  return dailyCounter.writeInFlight;
 }
 
-function addToYearlyCounter(year, deltaMs) {
+function addToDailyCounter(dayKey, deltaMs) {
   if (!Number.isFinite(deltaMs) || deltaMs <= 0) {
     return;
   }
-  const key = String(year);
-  const current = Number(yearlyCounter.totalsMsByYear[key] || 0);
-  yearlyCounter.totalsMsByYear[key] = Math.max(0, Math.round(current + deltaMs));
-  yearlyCounter.dirty = true;
+  const todayKey = pruneCounterToToday();
+  if (dayKey !== todayKey) {
+    return;
+  }
+  const current = Number(dailyCounter.totalsMsByDay[dayKey] || 0);
+  dailyCounter.totalsMsByDay[dayKey] = Math.max(0, Math.round(current + deltaMs));
+  dailyCounter.dirty = true;
   queueCounterFlush();
 }
 
-function addCounterDeltaAcrossYears(startObservedMs, endObservedMs, listenedDeltaMs) {
+function addCounterDeltaAcrossDays(startObservedMs, endObservedMs, listenedDeltaMs) {
   if (
     !Number.isFinite(startObservedMs) ||
     !Number.isFinite(endObservedMs) ||
@@ -263,9 +291,9 @@ function addCounterDeltaAcrossYears(startObservedMs, endObservedMs, listenedDelt
   let allocatedMs = 0;
 
   while (cursorMs < endObservedMs) {
-    const cursorYear = getUtcYearForMs(cursorMs);
-    const yearEndMs = getUtcYearStartMs(cursorYear + 1);
-    const segmentEndMs = Math.min(endObservedMs, yearEndMs);
+    const dayKey = getLocalDayKey(cursorMs);
+    const dayEndMs = getNextLocalDayStartMs(cursorMs);
+    const segmentEndMs = Math.min(endObservedMs, dayEndMs);
     const segmentDurationMs = Math.max(0, segmentEndMs - cursorMs);
     if (segmentDurationMs <= 0) {
       break;
@@ -275,7 +303,7 @@ function addCounterDeltaAcrossYears(startObservedMs, endObservedMs, listenedDelt
     if (segmentEndMs === endObservedMs) {
       segmentDeltaMs = Math.max(0, Math.round(listenedDeltaMs - allocatedMs));
     }
-    addToYearlyCounter(cursorYear, segmentDeltaMs);
+    addToDailyCounter(dayKey, segmentDeltaMs);
     allocatedMs += segmentDeltaMs;
     cursorMs = segmentEndMs;
   }
@@ -290,8 +318,8 @@ function observeNowPlayingForCounter(payload, observedAtMs = Date.now()) {
     durationMs: Math.max(0, Number(payload?.duration_ms || 0))
   };
 
-  const previous = yearlyCounter.lastSnapshot;
-  yearlyCounter.lastSnapshot = current;
+  const previous = dailyCounter.lastSnapshot;
+  dailyCounter.lastSnapshot = current;
 
   if (
     !previous ||
@@ -318,29 +346,114 @@ function observeNowPlayingForCounter(payload, observedAtMs = Date.now()) {
     return;
   }
 
-  addCounterDeltaAcrossYears(previous.observedAtMs, current.observedAtMs, clampedDeltaMs);
+  addCounterDeltaAcrossDays(previous.observedAtMs, current.observedAtMs, clampedDeltaMs);
 }
 
-async function loadYearlyCounterFromDisk() {
-  try {
-    const raw = await fs.readFile(COUNTER_STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    const incoming = parsed?.totals_ms_by_year || {};
-    const nextTotals = Object.create(null);
+async function fetchDailySeedMs(dayStartMs) {
+  let totalMs = 0;
+  let pageCount = 0;
+  let requestUrl = new URL("https://api.spotify.com/v1/me/player/recently-played");
+  requestUrl.searchParams.set("limit", "50");
+  requestUrl.searchParams.set("before", String(Date.now()));
+  let previousBeforeCursor = Number(requestUrl.searchParams.get("before"));
 
-    for (const [key, value] of Object.entries(incoming)) {
-      const year = Number(key);
-      const ms = Number(value);
-      if (Number.isInteger(year) && Number.isFinite(ms) && ms >= 0) {
-        nextTotals[String(year)] = Math.round(ms);
+  while (pageCount < DAILY_SEED_MAX_PAGES) {
+    const accessToken = await getAccessToken();
+    const response = await fetch(requestUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Spotify recently-played fetch failed (${response.status})`);
+    }
+
+    const data = await response.json();
+    const items = Array.isArray(data?.items) ? data.items : [];
+    if (items.length === 0) {
+      break;
+    }
+
+    let crossedStart = false;
+    for (const item of items) {
+      const playedAtMs = Date.parse(item?.played_at || "");
+      if (!Number.isFinite(playedAtMs)) {
+        continue;
+      }
+      if (playedAtMs < dayStartMs) {
+        crossedStart = true;
+        continue;
+      }
+      const durationMs = Number(item?.track?.duration_ms);
+      if (Number.isFinite(durationMs) && durationMs > 0) {
+        totalMs += durationMs;
       }
     }
 
-    yearlyCounter.totalsMsByYear = nextTotals;
+    pageCount += 1;
+    if (crossedStart) {
+      break;
+    }
+
+    const nextHref = typeof data?.next === "string" ? data.next : "";
+    if (!nextHref) {
+      break;
+    }
+
+    let nextUrl;
+    try {
+      nextUrl = new URL(nextHref);
+    } catch (_err) {
+      break;
+    }
+
+    const nextBeforeCursor = Number(nextUrl.searchParams.get("before"));
+    if (
+      !Number.isFinite(nextBeforeCursor) ||
+      nextBeforeCursor <= 0 ||
+      nextBeforeCursor >= previousBeforeCursor
+    ) {
+      break;
+    }
+
+    requestUrl = nextUrl;
+    previousBeforeCursor = nextBeforeCursor;
+  }
+
+  return Math.max(0, Math.round(totalMs));
+}
+
+function setTodaySeedIfHigher(seedMs) {
+  const todayKey = pruneCounterToToday();
+  const current = Number(dailyCounter.totalsMsByDay[todayKey] || 0);
+  if (seedMs > current) {
+    dailyCounter.totalsMsByDay[todayKey] = Math.round(seedMs);
+    dailyCounter.dirty = true;
+    queueCounterFlush();
+  }
+}
+
+async function loadDailyCounterFromDisk() {
+  try {
+    const raw = await fs.readFile(COUNTER_STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const incoming = parsed?.totals_ms_by_day || {};
+    const nextTotals = Object.create(null);
+
+    for (const [key, value] of Object.entries(incoming)) {
+      const ms = Number(value);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(key) && Number.isFinite(ms) && ms >= 0) {
+        nextTotals[key] = Math.round(ms);
+      }
+    }
+
+    dailyCounter.totalsMsByDay = nextTotals;
+    pruneCounterToToday();
   } catch (err) {
     if (err?.code !== "ENOENT") {
       console.error(
-        `Failed to load yearly counter from ${COUNTER_STATE_FILE}: ${
+        `Failed to load daily counter from ${COUNTER_STATE_FILE}: ${
           err?.message || String(err)
         }`
       );
@@ -353,31 +466,38 @@ async function sampleNowPlayingForCounter() {
   observeNowPlayingForCounter(payload);
 }
 
-function startYearlyCounterPolling() {
+function startDailyCounterPolling() {
   const pollTimer = setInterval(async () => {
-    if (yearlyCounter.pollInFlight) {
+    if (dailyCounter.pollInFlight) {
       return;
     }
-    yearlyCounter.pollInFlight = true;
+    dailyCounter.pollInFlight = true;
     try {
       await sampleNowPlayingForCounter();
     } catch (_err) {
       // Ignore intermittent API failures; next poll will continue tracking.
     } finally {
-      yearlyCounter.pollInFlight = false;
+      dailyCounter.pollInFlight = false;
     }
   }, COUNTER_POLL_MS);
   pollTimer.unref?.();
 }
 
-async function initYearlyCounter() {
-  await loadYearlyCounterFromDisk();
+async function initDailyCounter() {
+  await loadDailyCounterFromDisk();
+  try {
+    const dayStartMs = getLocalDayStartMs();
+    const seedMs = await fetchDailySeedMs(dayStartMs);
+    setTodaySeedIfHigher(seedMs);
+  } catch (_err) {
+    // If scope is missing or endpoint fails, keep live tracking without startup seed.
+  }
   try {
     await sampleNowPlayingForCounter();
   } catch (_err) {
     // Ignore startup fetch failures; polling loop will retry.
   }
-  startYearlyCounterPolling();
+  startDailyCounterPolling();
 }
 
 app.use("/api", rateLimit, requireApiAccess);
@@ -408,7 +528,7 @@ app.get("/api/now-playing", async (req, res) => {
       }
     }
     payload.viewers = viewerClients.size;
-    payload.yearly_minutes = getCurrentYearlyMinutes();
+    payload.daily_minutes = getCurrentDailyMinutes();
     res.json(payload);
   } catch (err) {
     res.status(502).json({ error: err.message || "Upstream error" });
@@ -530,7 +650,7 @@ app.get("/", (_req, res) => {
         border: 1px solid var(--stroke);
         color: var(--sub);
       }
-      .yearly-minutes {
+      .daily-minutes {
         display: inline-flex;
         align-items: center;
         gap: 6px;
@@ -540,7 +660,7 @@ app.get("/", (_req, res) => {
         border: 1px solid var(--stroke);
         color: var(--sub);
       }
-      .yearly-minutes strong {
+      .daily-minutes strong {
         color: var(--text);
         font-weight: 600;
       }
@@ -645,7 +765,7 @@ app.get("/", (_req, res) => {
     <main class="player">
       <div class="head">
         <span>Now Playing <span id="statusTag" class="status">CONNECTING</span></span>
-        <span class="yearly-minutes">This Year <strong id="yearlyMinutes">--</strong> min</span>
+        <span class="daily-minutes">Today <strong id="dailyMinutes">--</strong> min</span>
       </div>
       <section class="content">
         <img id="cover" class="cover" alt="Album artwork" />
@@ -674,7 +794,7 @@ app.get("/", (_req, res) => {
       const progressTotalEl = document.getElementById("progressTotal");
       const actionsEl = document.getElementById("actions");
       const statusTagEl = document.getElementById("statusTag");
-      const yearlyMinutesEl = document.getElementById("yearlyMinutes");
+      const dailyMinutesEl = document.getElementById("dailyMinutes");
 
       const IDLE_ART =
         "data:image/svg+xml;utf8," +
@@ -739,19 +859,19 @@ app.get("/", (_req, res) => {
         renderProgress();
       }
 
-      function renderYearlyMinutes(minutes) {
+      function renderDailyMinutes(minutes) {
         if (!Number.isFinite(minutes) || minutes < 0) {
-          yearlyMinutesEl.textContent = "--";
+          dailyMinutesEl.textContent = "--";
           return;
         }
-        yearlyMinutesEl.textContent = Math.floor(minutes).toLocaleString();
+        dailyMinutesEl.textContent = Math.floor(minutes).toLocaleString();
       }
 
       async function loadNowPlaying() {
         try {
           const response = await fetch("/api/now-playing", { cache: "no-store" });
           const data = await response.json();
-          renderYearlyMinutes(Number(data.yearly_minutes));
+          renderDailyMinutes(Number(data.daily_minutes));
 
           if (!response.ok || data.error) {
             setIdleState("Unavailable", data.error ? String(data.error) : "API error");
@@ -820,9 +940,9 @@ function handleShutdownSignal(signal) {
     return;
   }
   shuttingDown = true;
-  clearTimeout(yearlyCounter.flushTimer);
-  yearlyCounter.flushTimer = null;
-  void flushYearlyCounterToDisk(true).finally(() => {
+  clearTimeout(dailyCounter.flushTimer);
+  dailyCounter.flushTimer = null;
+  void flushDailyCounterToDisk(true).finally(() => {
     process.exit(signal === "SIGINT" || signal === "SIGTERM" ? 0 : 1);
   });
 }
@@ -840,12 +960,12 @@ process.on("unhandledRejection", (err) => {
 
 app.listen(PORT, () => {
   console.log(`spot service listening on :${PORT}`);
-  initYearlyCounter()
+  initDailyCounter()
     .then(() => {
-      console.log(`yearly counter ready at ${COUNTER_STATE_FILE}`);
+      console.log(`daily counter ready at ${COUNTER_STATE_FILE}`);
     })
     .catch((err) => {
-      console.error(`yearly counter init failed: ${err?.message || String(err)}`);
+      console.error(`daily counter init failed: ${err?.message || String(err)}`);
     });
 });
 

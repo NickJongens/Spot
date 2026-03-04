@@ -1,6 +1,6 @@
 # Spot
 
-Dockerized web service for Spotify "now playing" data with a persistent yearly listening counter.
+Dockerized web service for Spotify "now playing" data with a persistent daily listening counter.
 
 ## Pattern
 
@@ -8,12 +8,12 @@ This implementation uses **Pattern A** (bring your own refresh token):
 
 - You provide `SPOTIFY_REFRESH_TOKEN` externally via env var.
 - Service refreshes short-lived access tokens in memory.
-- Service stores yearly listening totals on disk at `COUNTER_STATE_FILE`.
+- Service stores daily listening totals on disk at `COUNTER_STATE_FILE`.
 
 ## Endpoints
 
-- `GET /` HTML page that polls every 2s and shows year-to-date listening minutes
-- `GET /api/now-playing` JSON (includes `yearly_minutes`)
+- `GET /` HTML page that polls every 2s and shows today's listening minutes
+- `GET /api/now-playing` JSON (includes `daily_minutes`)
 - `GET /api/now-playing.txt` plain text
 - `GET /api/history` last 5 tracks with timestamps
 - `GET /api/viewers` viewer count for the `/` page
@@ -65,15 +65,18 @@ Advanced/manual method:
 ## Optional env vars
 
 - `PORT` (default `3000`)
-- `SCOPES` (default `user-read-currently-playing user-read-playback-state`)
+- `SCOPES` (default `user-read-currently-playing user-read-playback-state user-read-recently-played`)
 - `PUBLIC_MODE` (default `true`)
 - `API_KEY` (if set, require `Authorization: Bearer <API_KEY>` for `/api/*`)
 - `BASE_URL` (not used in Pattern A; reserved for possible helper OAuth mode)
-- `COUNTER_STATE_FILE` (default `./data/yearly-counter.json`)
+- `COUNTER_STATE_FILE` (default `./data/daily-counter.json`)
 - `COUNTER_POLL_MS` (default `5000`)
 - `COUNTER_FLUSH_DEBOUNCE_MS` (default `3000`)
+- `DAILY_SEED_MAX_PAGES` (default `24`)
 
-`yearly_minutes` is tracked continuously while the service is running; it is not a historical backfill of all prior Spotify listening.
+`daily_minutes` resets each day and is tracked continuously while the service is running. On container launch, the service seeds today's total from Spotify recently played history, then continues live tracking.
+
+If your existing refresh token was created without `user-read-recently-played`, regenerate it so startup seeding can work.
 
 ## Local run
 
@@ -88,7 +91,7 @@ npm start
 docker compose up --build
 ```
 
-For durable persistence across container recreation, mount a writable path to `/app/data` and keep `COUNTER_STATE_FILE=/app/data/yearly-counter.json`.
+`docker-compose.yml` now includes a named volume (`spot-data`) mounted at `/app/data` so daily counter state survives container recreation.
 
 ## GitHub Container Build
 
