@@ -6,7 +6,8 @@ const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_MODE = (process.env.PUBLIC_MODE || "true").toLowerCase() === "true";
 const API_KEY = process.env.API_KEY;
 const SCOPES =
-  process.env.SCOPES || "user-read-currently-playing user-read-playback-state";
+  process.env.SCOPES ||
+  "user-read-currently-playing user-read-playback-state user-read-recently-played";
 
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
@@ -30,6 +31,14 @@ const RATE_LIMIT_MAX = 120;
 const viewerClients = new Set();
 const history = [];
 let lastHistoryTrackId = "";
+const YEARLY_LISTENING_CACHE_MS = 10 * 60_000;
+const YEARLY_LISTENING_MAX_PAGES = 500;
+const yearlyListeningCache = {
+  year: 0,
+  totalMs: 0,
+  fetchedAt: 0,
+  inFlight: null
+};
 
 function noStore(res) {
   res.set("Cache-Control", "no-store");
@@ -153,6 +162,115 @@ async function fetchNowPlaying() {
   return mapNowPlaying(data);
 }
 
+function getUtcYearStartMs(year) {
+  return Date.UTC(year, 0, 1, 0, 0, 0, 0);
+}
+
+async function fetchYearlyListeningTotalMs() {
+  const year = new Date().getUTCFullYear();
+  const yearStartMs = getUtcYearStartMs(year);
+  let totalMs = 0;
+  let beforeCursor = Date.now();
+  let pageCount = 0;
+
+  while (pageCount < YEARLY_LISTENING_MAX_PAGES) {
+    const accessToken = await getAccessToken();
+    const endpoint = new URL("https://api.spotify.com/v1/me/player/recently-played");
+    endpoint.searchParams.set("limit", "50");
+    endpoint.searchParams.set("before", String(beforeCursor));
+
+    const response = await fetch(endpoint, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Spotify recently-played fetch failed (${response.status})`);
+    }
+
+    const data = await response.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (items.length === 0) {
+      break;
+    }
+
+    let reachedYearBoundary = false;
+    for (const item of items) {
+      const playedAtMs = Date.parse(item?.played_at || "");
+      if (!Number.isFinite(playedAtMs)) {
+        continue;
+      }
+      if (playedAtMs < yearStartMs) {
+        reachedYearBoundary = true;
+        continue;
+      }
+      const trackDurationMs = Number(item?.track?.duration_ms);
+      if (Number.isFinite(trackDurationMs) && trackDurationMs > 0) {
+        totalMs += trackDurationMs;
+      }
+    }
+
+    pageCount += 1;
+    if (reachedYearBoundary) {
+      break;
+    }
+
+    const nextBeforeCursor = Number(data?.cursors?.before);
+    if (
+      Number.isFinite(nextBeforeCursor) &&
+      nextBeforeCursor > 0 &&
+      nextBeforeCursor < beforeCursor
+    ) {
+      beforeCursor = nextBeforeCursor;
+      continue;
+    }
+
+    const oldestPlayedAtMs = Date.parse(items[items.length - 1]?.played_at || "");
+    if (!Number.isFinite(oldestPlayedAtMs) || oldestPlayedAtMs <= yearStartMs) {
+      break;
+    }
+    if (oldestPlayedAtMs >= beforeCursor) {
+      break;
+    }
+    beforeCursor = oldestPlayedAtMs - 1;
+  }
+
+  return { year, totalMs };
+}
+
+async function getYearlyListeningMinutes() {
+  const year = new Date().getUTCFullYear();
+  const now = Date.now();
+  const isCurrentYear = yearlyListeningCache.year === year;
+  const hasFreshCache =
+    isCurrentYear && now - yearlyListeningCache.fetchedAt < YEARLY_LISTENING_CACHE_MS;
+  if (hasFreshCache) {
+    return Math.floor(yearlyListeningCache.totalMs / 60_000);
+  }
+
+  if (!yearlyListeningCache.inFlight) {
+    yearlyListeningCache.inFlight = (async () => {
+      const result = await fetchYearlyListeningTotalMs();
+      yearlyListeningCache.year = result.year;
+      yearlyListeningCache.totalMs = result.totalMs;
+      yearlyListeningCache.fetchedAt = Date.now();
+      return Math.floor(result.totalMs / 60_000);
+    })().finally(() => {
+      yearlyListeningCache.inFlight = null;
+    });
+  }
+
+  try {
+    return await yearlyListeningCache.inFlight;
+  } catch (err) {
+    if (isCurrentYear && yearlyListeningCache.fetchedAt > 0) {
+      return Math.floor(yearlyListeningCache.totalMs / 60_000);
+    }
+    throw err;
+  }
+}
+
 app.use("/api", rateLimit, requireApiAccess);
 
 app.get("/api/health", (req, res) => {
@@ -163,7 +281,10 @@ app.get("/api/health", (req, res) => {
 app.get("/api/now-playing", async (req, res) => {
   noStore(res);
   try {
-    const payload = await fetchNowPlaying();
+    const [payload, yearlyMinutesResult] = await Promise.all([
+      fetchNowPlaying(),
+      getYearlyListeningMinutes().catch(() => null)
+    ]);
     if (payload && payload.id && payload.id !== lastHistoryTrackId) {
       lastHistoryTrackId = payload.id;
       history.unshift({
@@ -180,6 +301,9 @@ app.get("/api/now-playing", async (req, res) => {
       }
     }
     payload.viewers = viewerClients.size;
+    payload.yearly_minutes = Number.isFinite(yearlyMinutesResult)
+      ? yearlyMinutesResult
+      : null;
     res.json(payload);
   } catch (err) {
     res.status(502).json({ error: err.message || "Upstream error" });
@@ -301,7 +425,7 @@ app.get("/", (_req, res) => {
         border: 1px solid var(--stroke);
         color: var(--sub);
       }
-      .viewer {
+      .yearly-minutes {
         display: inline-flex;
         align-items: center;
         gap: 6px;
@@ -311,7 +435,7 @@ app.get("/", (_req, res) => {
         border: 1px solid var(--stroke);
         color: var(--sub);
       }
-      .viewer strong {
+      .yearly-minutes strong {
         color: var(--text);
         font-weight: 600;
       }
@@ -416,7 +540,7 @@ app.get("/", (_req, res) => {
     <main class="player">
       <div class="head">
         <span>Now Playing <span id="statusTag" class="status">CONNECTING</span></span>
-        <span class="viewer">Viewers <strong id="viewerCount">0</strong></span>
+        <span class="yearly-minutes">This Year <strong id="yearlyMinutes">--</strong> min</span>
       </div>
       <section class="content">
         <img id="cover" class="cover" alt="Album artwork" />
@@ -445,7 +569,7 @@ app.get("/", (_req, res) => {
       const progressTotalEl = document.getElementById("progressTotal");
       const actionsEl = document.getElementById("actions");
       const statusTagEl = document.getElementById("statusTag");
-      const viewerCountEl = document.getElementById("viewerCount");
+      const yearlyMinutesEl = document.getElementById("yearlyMinutes");
 
       const IDLE_ART =
         "data:image/svg+xml;utf8," +
@@ -510,10 +634,19 @@ app.get("/", (_req, res) => {
         renderProgress();
       }
 
+      function renderYearlyMinutes(minutes) {
+        if (!Number.isFinite(minutes) || minutes < 0) {
+          yearlyMinutesEl.textContent = "--";
+          return;
+        }
+        yearlyMinutesEl.textContent = Math.floor(minutes).toLocaleString();
+      }
+
       async function loadNowPlaying() {
         try {
           const response = await fetch("/api/now-playing", { cache: "no-store" });
           const data = await response.json();
+          renderYearlyMinutes(Number(data.yearly_minutes));
 
           if (!response.ok || data.error) {
             setIdleState("Unavailable", data.error ? String(data.error) : "API error");
@@ -571,31 +704,6 @@ app.get("/", (_req, res) => {
 
       loadNowPlaying();
       setInterval(loadNowPlaying, 2000);
-
-      if ("EventSource" in window) {
-        const viewerStream = new EventSource("/api/viewers/stream");
-        viewerStream.onmessage = (event) => {
-          const count = Number(event.data || 0);
-          viewerCountEl.textContent = Number.isFinite(count) ? String(count) : "0";
-        };
-        viewerStream.onerror = () => {
-          viewerStream.close();
-        };
-      } else {
-        const loadViewers = async () => {
-          try {
-            const response = await fetch("/api/viewers", { cache: "no-store" });
-            const data = await response.json();
-            viewerCountEl.textContent = Number.isFinite(data.viewers)
-              ? String(data.viewers)
-              : "0";
-          } catch (_err) {
-            viewerCountEl.textContent = "0";
-          }
-        };
-        loadViewers();
-        setInterval(loadViewers, 5000);
-      }
     </script>
   </body>
 </html>`);

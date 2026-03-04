@@ -12,8 +12,8 @@ This implementation uses **Pattern A** (bring your own refresh token):
 
 ## Endpoints
 
-- `GET /` HTML page that polls every 2s
-- `GET /api/now-playing` JSON
+- `GET /` HTML page that polls every 2s and shows year-to-date listening minutes
+- `GET /api/now-playing` JSON (includes `yearly_minutes`)
 - `GET /api/now-playing.txt` plain text
 - `GET /api/history` last 5 tracks with timestamps
 - `GET /api/viewers` viewer count for the `/` page
@@ -65,10 +65,12 @@ Advanced/manual method:
 ## Optional env vars
 
 - `PORT` (default `3000`)
-- `SCOPES` (default `user-read-currently-playing user-read-playback-state`)
+- `SCOPES` (default `user-read-currently-playing user-read-playback-state user-read-recently-played`)
 - `PUBLIC_MODE` (default `true`)
 - `API_KEY` (if set, require `Authorization: Bearer <API_KEY>` for `/api/*`)
 - `BASE_URL` (not used in Pattern A; reserved for possible helper OAuth mode)
+
+If your existing refresh token was created without `user-read-recently-played`, generate a new one so `yearly_minutes` can be calculated.
 
 ## Local run
 
