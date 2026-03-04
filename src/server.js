@@ -1,4 +1,7 @@
-﻿import express from "express";
+import express from "express";
+import path from "node:path";
+import { promises as fs } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const app = express();
 
@@ -7,7 +10,16 @@ const PUBLIC_MODE = (process.env.PUBLIC_MODE || "true").toLowerCase() === "true"
 const API_KEY = process.env.API_KEY;
 const SCOPES =
   process.env.SCOPES ||
-  "user-read-currently-playing user-read-playback-state user-read-recently-played";
+  "user-read-currently-playing user-read-playback-state";
+const COUNTER_POLL_MS = Math.max(2000, Number(process.env.COUNTER_POLL_MS || 5000));
+const COUNTER_FLUSH_DEBOUNCE_MS = Math.max(
+  1000,
+  Number(process.env.COUNTER_FLUSH_DEBOUNCE_MS || 3000)
+);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const COUNTER_STATE_FILE =
+  process.env.COUNTER_STATE_FILE || path.join(__dirname, "..", "data", "yearly-counter.json");
 
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
@@ -31,13 +43,13 @@ const RATE_LIMIT_MAX = 120;
 const viewerClients = new Set();
 const history = [];
 let lastHistoryTrackId = "";
-const YEARLY_LISTENING_CACHE_MS = 10 * 60_000;
-const YEARLY_LISTENING_MAX_PAGES = 500;
-const yearlyListeningCache = {
-  year: 0,
-  totalMs: 0,
-  fetchedAt: 0,
-  inFlight: null
+const yearlyCounter = {
+  totalsMsByYear: Object.create(null),
+  lastSnapshot: null,
+  dirty: false,
+  flushTimer: null,
+  writeInFlight: Promise.resolve(),
+  pollInFlight: false
 };
 
 function noStore(res) {
@@ -166,109 +178,206 @@ function getUtcYearStartMs(year) {
   return Date.UTC(year, 0, 1, 0, 0, 0, 0);
 }
 
-async function fetchYearlyListeningTotalMs() {
-  const year = new Date().getUTCFullYear();
-  const yearStartMs = getUtcYearStartMs(year);
-  let totalMs = 0;
-  let beforeCursor = Date.now();
-  let pageCount = 0;
-
-  while (pageCount < YEARLY_LISTENING_MAX_PAGES) {
-    const accessToken = await getAccessToken();
-    const endpoint = new URL("https://api.spotify.com/v1/me/player/recently-played");
-    endpoint.searchParams.set("limit", "50");
-    endpoint.searchParams.set("before", String(beforeCursor));
-
-    const response = await fetch(endpoint, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Spotify recently-played fetch failed (${response.status})`);
-    }
-
-    const data = await response.json();
-    const items = Array.isArray(data.items) ? data.items : [];
-    if (items.length === 0) {
-      break;
-    }
-
-    let reachedYearBoundary = false;
-    for (const item of items) {
-      const playedAtMs = Date.parse(item?.played_at || "");
-      if (!Number.isFinite(playedAtMs)) {
-        continue;
-      }
-      if (playedAtMs < yearStartMs) {
-        reachedYearBoundary = true;
-        continue;
-      }
-      const trackDurationMs = Number(item?.track?.duration_ms);
-      if (Number.isFinite(trackDurationMs) && trackDurationMs > 0) {
-        totalMs += trackDurationMs;
-      }
-    }
-
-    pageCount += 1;
-    if (reachedYearBoundary) {
-      break;
-    }
-
-    const nextBeforeCursor = Number(data?.cursors?.before);
-    if (
-      Number.isFinite(nextBeforeCursor) &&
-      nextBeforeCursor > 0 &&
-      nextBeforeCursor < beforeCursor
-    ) {
-      beforeCursor = nextBeforeCursor;
-      continue;
-    }
-
-    const oldestPlayedAtMs = Date.parse(items[items.length - 1]?.played_at || "");
-    if (!Number.isFinite(oldestPlayedAtMs) || oldestPlayedAtMs <= yearStartMs) {
-      break;
-    }
-    if (oldestPlayedAtMs >= beforeCursor) {
-      break;
-    }
-    beforeCursor = oldestPlayedAtMs - 1;
-  }
-
-  return { year, totalMs };
+function getUtcYearForMs(ms) {
+  return new Date(ms).getUTCFullYear();
 }
 
-async function getYearlyListeningMinutes() {
-  const year = new Date().getUTCFullYear();
-  const now = Date.now();
-  const isCurrentYear = yearlyListeningCache.year === year;
-  const hasFreshCache =
-    isCurrentYear && now - yearlyListeningCache.fetchedAt < YEARLY_LISTENING_CACHE_MS;
-  if (hasFreshCache) {
-    return Math.floor(yearlyListeningCache.totalMs / 60_000);
-  }
+function getCurrentUtcYear() {
+  return new Date().getUTCFullYear();
+}
 
-  if (!yearlyListeningCache.inFlight) {
-    yearlyListeningCache.inFlight = (async () => {
-      const result = await fetchYearlyListeningTotalMs();
-      yearlyListeningCache.year = result.year;
-      yearlyListeningCache.totalMs = result.totalMs;
-      yearlyListeningCache.fetchedAt = Date.now();
-      return Math.floor(result.totalMs / 60_000);
-    })().finally(() => {
-      yearlyListeningCache.inFlight = null;
-    });
-  }
+function getCurrentYearlyMinutes() {
+  const yearKey = String(getCurrentUtcYear());
+  const totalMs = Number(yearlyCounter.totalsMsByYear[yearKey] || 0);
+  return Math.floor(Math.max(0, totalMs) / 60_000);
+}
 
-  try {
-    return await yearlyListeningCache.inFlight;
-  } catch (err) {
-    if (isCurrentYear && yearlyListeningCache.fetchedAt > 0) {
-      return Math.floor(yearlyListeningCache.totalMs / 60_000);
+function queueCounterFlush() {
+  if (yearlyCounter.flushTimer) {
+    return;
+  }
+  yearlyCounter.flushTimer = setTimeout(() => {
+    yearlyCounter.flushTimer = null;
+    void flushYearlyCounterToDisk();
+  }, COUNTER_FLUSH_DEBOUNCE_MS);
+  yearlyCounter.flushTimer.unref?.();
+}
+
+async function flushYearlyCounterToDisk(force = false) {
+  yearlyCounter.writeInFlight = yearlyCounter.writeInFlight.then(async () => {
+    if (!force && !yearlyCounter.dirty) {
+      return;
     }
-    throw err;
+
+    const payload = {
+      version: 1,
+      totals_ms_by_year: yearlyCounter.totalsMsByYear,
+      updated_at: new Date().toISOString()
+    };
+
+    const dir = path.dirname(COUNTER_STATE_FILE);
+    const tmpPath = `${COUNTER_STATE_FILE}.tmp`;
+
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(tmpPath, JSON.stringify(payload), "utf8");
+      await fs.rename(tmpPath, COUNTER_STATE_FILE);
+      yearlyCounter.dirty = false;
+    } catch (err) {
+      console.error(
+        `Failed to persist yearly counter at ${COUNTER_STATE_FILE}: ${
+          err?.message || String(err)
+        }`
+      );
+    }
+  });
+
+  return yearlyCounter.writeInFlight;
+}
+
+function addToYearlyCounter(year, deltaMs) {
+  if (!Number.isFinite(deltaMs) || deltaMs <= 0) {
+    return;
   }
+  const key = String(year);
+  const current = Number(yearlyCounter.totalsMsByYear[key] || 0);
+  yearlyCounter.totalsMsByYear[key] = Math.max(0, Math.round(current + deltaMs));
+  yearlyCounter.dirty = true;
+  queueCounterFlush();
+}
+
+function addCounterDeltaAcrossYears(startObservedMs, endObservedMs, listenedDeltaMs) {
+  if (
+    !Number.isFinite(startObservedMs) ||
+    !Number.isFinite(endObservedMs) ||
+    !Number.isFinite(listenedDeltaMs)
+  ) {
+    return;
+  }
+  if (endObservedMs <= startObservedMs || listenedDeltaMs <= 0) {
+    return;
+  }
+
+  const intervalMs = endObservedMs - startObservedMs;
+  let cursorMs = startObservedMs;
+  let allocatedMs = 0;
+
+  while (cursorMs < endObservedMs) {
+    const cursorYear = getUtcYearForMs(cursorMs);
+    const yearEndMs = getUtcYearStartMs(cursorYear + 1);
+    const segmentEndMs = Math.min(endObservedMs, yearEndMs);
+    const segmentDurationMs = Math.max(0, segmentEndMs - cursorMs);
+    if (segmentDurationMs <= 0) {
+      break;
+    }
+
+    let segmentDeltaMs = Math.round((listenedDeltaMs * segmentDurationMs) / intervalMs);
+    if (segmentEndMs === endObservedMs) {
+      segmentDeltaMs = Math.max(0, Math.round(listenedDeltaMs - allocatedMs));
+    }
+    addToYearlyCounter(cursorYear, segmentDeltaMs);
+    allocatedMs += segmentDeltaMs;
+    cursorMs = segmentEndMs;
+  }
+}
+
+function observeNowPlayingForCounter(payload, observedAtMs = Date.now()) {
+  const current = {
+    observedAtMs,
+    id: String(payload?.id || ""),
+    isPlaying: payload?.is_playing === true,
+    progressMs: Math.max(0, Number(payload?.progress_ms || 0)),
+    durationMs: Math.max(0, Number(payload?.duration_ms || 0))
+  };
+
+  const previous = yearlyCounter.lastSnapshot;
+  yearlyCounter.lastSnapshot = current;
+
+  if (
+    !previous ||
+    !previous.isPlaying ||
+    !current.isPlaying ||
+    !previous.id ||
+    previous.id !== current.id
+  ) {
+    return;
+  }
+
+  const wallDeltaMs = current.observedAtMs - previous.observedAtMs;
+  if (wallDeltaMs <= 0) {
+    return;
+  }
+
+  const progressDeltaMs = current.progressMs - previous.progressMs;
+  if (progressDeltaMs <= 0) {
+    return;
+  }
+
+  const clampedDeltaMs = Math.min(progressDeltaMs, wallDeltaMs + 3_000);
+  if (clampedDeltaMs <= 0) {
+    return;
+  }
+
+  addCounterDeltaAcrossYears(previous.observedAtMs, current.observedAtMs, clampedDeltaMs);
+}
+
+async function loadYearlyCounterFromDisk() {
+  try {
+    const raw = await fs.readFile(COUNTER_STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const incoming = parsed?.totals_ms_by_year || {};
+    const nextTotals = Object.create(null);
+
+    for (const [key, value] of Object.entries(incoming)) {
+      const year = Number(key);
+      const ms = Number(value);
+      if (Number.isInteger(year) && Number.isFinite(ms) && ms >= 0) {
+        nextTotals[String(year)] = Math.round(ms);
+      }
+    }
+
+    yearlyCounter.totalsMsByYear = nextTotals;
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      console.error(
+        `Failed to load yearly counter from ${COUNTER_STATE_FILE}: ${
+          err?.message || String(err)
+        }`
+      );
+    }
+  }
+}
+
+async function sampleNowPlayingForCounter() {
+  const payload = await fetchNowPlaying();
+  observeNowPlayingForCounter(payload);
+}
+
+function startYearlyCounterPolling() {
+  const pollTimer = setInterval(async () => {
+    if (yearlyCounter.pollInFlight) {
+      return;
+    }
+    yearlyCounter.pollInFlight = true;
+    try {
+      await sampleNowPlayingForCounter();
+    } catch (_err) {
+      // Ignore intermittent API failures; next poll will continue tracking.
+    } finally {
+      yearlyCounter.pollInFlight = false;
+    }
+  }, COUNTER_POLL_MS);
+  pollTimer.unref?.();
+}
+
+async function initYearlyCounter() {
+  await loadYearlyCounterFromDisk();
+  try {
+    await sampleNowPlayingForCounter();
+  } catch (_err) {
+    // Ignore startup fetch failures; polling loop will retry.
+  }
+  startYearlyCounterPolling();
 }
 
 app.use("/api", rateLimit, requireApiAccess);
@@ -281,10 +390,8 @@ app.get("/api/health", (req, res) => {
 app.get("/api/now-playing", async (req, res) => {
   noStore(res);
   try {
-    const [payload, yearlyMinutesResult] = await Promise.all([
-      fetchNowPlaying(),
-      getYearlyListeningMinutes().catch(() => null)
-    ]);
+    const payload = await fetchNowPlaying();
+    observeNowPlayingForCounter(payload);
     if (payload && payload.id && payload.id !== lastHistoryTrackId) {
       lastHistoryTrackId = payload.id;
       history.unshift({
@@ -301,9 +408,7 @@ app.get("/api/now-playing", async (req, res) => {
       }
     }
     payload.viewers = viewerClients.size;
-    payload.yearly_minutes = Number.isFinite(yearlyMinutesResult)
-      ? yearlyMinutesResult
-      : null;
+    payload.yearly_minutes = getCurrentYearlyMinutes();
     res.json(payload);
   } catch (err) {
     res.status(502).json({ error: err.message || "Upstream error" });
@@ -708,7 +813,39 @@ app.get("/", (_req, res) => {
   </body>
 </html>`);
 });
+
+let shuttingDown = false;
+function handleShutdownSignal(signal) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  clearTimeout(yearlyCounter.flushTimer);
+  yearlyCounter.flushTimer = null;
+  void flushYearlyCounterToDisk(true).finally(() => {
+    process.exit(signal === "SIGINT" || signal === "SIGTERM" ? 0 : 1);
+  });
+}
+
+process.on("SIGINT", () => handleShutdownSignal("SIGINT"));
+process.on("SIGTERM", () => handleShutdownSignal("SIGTERM"));
+process.on("uncaughtException", (err) => {
+  console.error(err);
+  handleShutdownSignal("uncaughtException");
+});
+process.on("unhandledRejection", (err) => {
+  console.error(err);
+  handleShutdownSignal("unhandledRejection");
+});
+
 app.listen(PORT, () => {
   console.log(`spot service listening on :${PORT}`);
+  initYearlyCounter()
+    .then(() => {
+      console.log(`yearly counter ready at ${COUNTER_STATE_FILE}`);
+    })
+    .catch((err) => {
+      console.error(`yearly counter init failed: ${err?.message || String(err)}`);
+    });
 });
 

@@ -11,5 +11,8 @@ services:
       SCOPES: ${SCOPES:-user-read-currently-playing user-read-playback-state}
       PUBLIC_MODE: ${PUBLIC_MODE:-true}
       API_KEY: ${API_KEY:-}
+      COUNTER_STATE_FILE: ${COUNTER_STATE_FILE:-/app/data/yearly-counter.json}
+      COUNTER_POLL_MS: ${COUNTER_POLL_MS:-5000}
+      COUNTER_FLUSH_DEBOUNCE_MS: ${COUNTER_FLUSH_DEBOUNCE_MS:-3000}
       PORT: 3000
     restart: unless-stopped

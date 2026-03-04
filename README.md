@@ -1,6 +1,6 @@
 # Spot
 
-Stateless, read-only Dockerized web service for Spotify "now playing" data.
+Dockerized web service for Spotify "now playing" data with a persistent yearly listening counter.
 
 ## Pattern
 
@@ -8,7 +8,7 @@ This implementation uses **Pattern A** (bring your own refresh token):
 
 - You provide `SPOTIFY_REFRESH_TOKEN` externally via env var.
 - Service refreshes short-lived access tokens in memory.
-- No disk/database/volume persistence is used for core functionality.
+- Service stores yearly listening totals on disk at `COUNTER_STATE_FILE`.
 
 ## Endpoints
 
@@ -65,12 +65,15 @@ Advanced/manual method:
 ## Optional env vars
 
 - `PORT` (default `3000`)
-- `SCOPES` (default `user-read-currently-playing user-read-playback-state user-read-recently-played`)
+- `SCOPES` (default `user-read-currently-playing user-read-playback-state`)
 - `PUBLIC_MODE` (default `true`)
 - `API_KEY` (if set, require `Authorization: Bearer <API_KEY>` for `/api/*`)
 - `BASE_URL` (not used in Pattern A; reserved for possible helper OAuth mode)
+- `COUNTER_STATE_FILE` (default `./data/yearly-counter.json`)
+- `COUNTER_POLL_MS` (default `5000`)
+- `COUNTER_FLUSH_DEBOUNCE_MS` (default `3000`)
 
-If your existing refresh token was created without `user-read-recently-played`, generate a new one so `yearly_minutes` can be calculated.
+`yearly_minutes` is tracked continuously while the service is running; it is not a historical backfill of all prior Spotify listening.
 
 ## Local run
 
@@ -85,7 +88,7 @@ npm start
 docker compose up --build
 ```
 
-No volumes are required or defined.
+For durable persistence across container recreation, mount a writable path to `/app/data` and keep `COUNTER_STATE_FILE=/app/data/yearly-counter.json`.
 
 ## GitHub Container Build
 

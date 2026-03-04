@@ -1,7 +1,7 @@
 param(
   [string]$ClientId,
   [string]$ClientSecret,
-  [string]$Scopes = "user-read-currently-playing user-read-playback-state user-read-recently-played",
+  [string]$Scopes = "user-read-currently-playing user-read-playback-state",
   [string]$RedirectUri = "http://127.0.0.1:8888/callback/"
 )
 
